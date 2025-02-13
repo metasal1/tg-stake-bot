@@ -58,34 +58,38 @@ async function getStakeAccounts(pubkey) {
             }
         );
 
-        const detailedAccounts = accounts.map(account => {
-            const parsedData = account.account.data.parsed;
-            const stake = account.account.lamports / LAMPORTS_PER_SOL;
-            const stakeInfo = parsedData.info.stake;
-            const meta = parsedData.info.meta;
-            const activation = stakeInfo?.delegation?.activationEpoch;
-            const deactivation = stakeInfo?.delegation?.deactivationEpoch;
-            const epochsStaked = activation ? currentEpoch - Number(activation) : 0;
-            const finalStake = stake * (1 - calculatePenaltyRate(stake) / 100) * calculateMultiplier(epochsStaked);
+        // Filter and map accounts
+        const detailedAccounts = accounts
+            .map(account => {
+                const parsedData = account.account.data.parsed;
+                const stake = account.account.lamports / LAMPORTS_PER_SOL;
+                const stakeInfo = parsedData.info.stake;
+                const meta = parsedData.info.meta;
+                const activation = stakeInfo?.delegation?.activationEpoch;
+                const deactivation = stakeInfo?.delegation?.deactivationEpoch;
+                const epochsStaked = activation ? currentEpoch - Number(activation) : 0;
+                const finalStake = stake * (1 - calculatePenaltyRate(stake) / 100) * calculateMultiplier(epochsStaked);
 
-            return {
-                address: account.pubkey.toString(),
-                originalStake: stake,
-                penaltyRate: calculatePenaltyRate(stake),
-                penaltyAmount: (stake * calculatePenaltyRate(stake)) / 100,
-                epochsStaked,
-                multiplier: calculateMultiplier(epochsStaked),
-                finalStake,
-                stakeAuthority: meta.authorized.staker,
-                withdrawAuthority: meta.authorized.withdrawer,
-                status: deactivation === '18446744073709551615' ? 'Active' : 'Inactive',
-                activationStatus: activation ? 'Activated' : 'Pending',
-                activationEpoch: activation || null,
-                deactivationEpoch: deactivation === '18446744073709551615' ? null : deactivation
-            };
-        });
+                return {
+                    address: account.pubkey.toString(),
+                    originalStake: stake,
+                    penaltyRate: calculatePenaltyRate(stake),
+                    penaltyAmount: (stake * calculatePenaltyRate(stake)) / 100,
+                    epochsStaked,
+                    multiplier: calculateMultiplier(epochsStaked),
+                    finalStake,
+                    stakeAuthority: meta.authorized.staker,
+                    withdrawAuthority: meta.authorized.withdrawer,
+                    status: deactivation === '18446744073709551615' ? 'Active' : 'Inactive',
+                    activationStatus: activation ? 'Activated' : 'Pending',
+                    activationEpoch: activation || null,
+                    deactivationEpoch: deactivation === '18446744073709551615' ? null : deactivation
+                };
+            })
+            // Filter out inactive accounts
+            .filter(account => account.status === 'Active' && account.activationStatus === 'Activated');
 
-        // Calculate total final stake for reward distribution
+        // Calculate total final stake for reward distribution using only active accounts
         const totalFinalStake = detailedAccounts.reduce((acc, account) => acc + account.finalStake, 0);
 
         // Add reward calculations
@@ -127,8 +131,7 @@ async function sendTelegramFile(filePath, caption) {
 async function generateAndSendReport(epoch) {
     try {
         const stakeAccounts = await getStakeAccounts(VALIDATOR_VOTE_ADDRESS);
-        const totalOriginalStake = stakeAccounts.reduce((acc, account) => acc + account.originalStake, 0);
-        const totalFinalStake = stakeAccounts.reduce((acc, account) => acc + account.finalStake, 0);
+        const totalStake = stakeAccounts.reduce((acc, account) => acc + account.originalStake, 0);
 
         // Save to CSV
         const filename = `${epoch}.csv`;
@@ -157,13 +160,12 @@ async function generateAndSendReport(epoch) {
 
         fs.writeFileSync(filename, csvContent);
 
-        // Send report to Telegram
+        // Modified Telegram message
         const message = `
 <b>🔄 Epoch ${epoch} Stake Report</b>
 
 📊 <b>Statistics:</b>
-• Total Original Stake: ${totalOriginalStake.toFixed(2)} SOL
-• Total Final Stake: ${totalFinalStake.toFixed(2)} SOL
+• Total Stake: ${totalStake.toFixed(2)} SOL
 • Number of Accounts: ${stakeAccounts.length}
 • Total Reward Pool: ${TOTAL_REWARD_POOL.toLocaleString()} Tokens
 
@@ -189,18 +191,30 @@ async function sendHeartbeat() {
     const currentDay = now.toISOString().split('T')[0];
 
     if (lastHeartbeatDay !== currentDay) {
-        const message = `
+        try {
+            const epochInfo = await connection.getEpochInfo();
+            const slotsRemaining = epochInfo.slotsInEpoch - epochInfo.slotIndex;
+            const estimatedMinutesRemaining = Math.floor((slotsRemaining * 0.4) / 60);
+
+            const message = `
 <b>💗 Daily Heartbeat</b>
 
 Bot is running and monitoring:
 • Current Time: ${now.toLocaleString()}
 • Validator: <code>${VALIDATOR_VOTE_ADDRESS}</code>
+• Current Epoch: ${epochInfo.epoch}
+• ETA Next Epoch: ~${estimatedMinutesRemaining} minutes
+• Slots Remaining: ${slotsRemaining.toLocaleString()}
 
-Next epoch report will be sent automatically when epoch changes.`;
+Next epoch report will be sent automatically when epoch ${epochInfo.epoch + 1} starts.`;
 
-        await sendTelegramMessage(message);
-        lastHeartbeatDay = currentDay;
-        console.log('Daily heartbeat sent:', currentDay);
+            await sendTelegramMessage(message);
+            lastHeartbeatDay = currentDay;
+            console.log('Daily heartbeat sent:', currentDay);
+        } catch (error) {
+            console.error('Error sending heartbeat:', error);
+            throw error;
+        }
     }
 }
 
